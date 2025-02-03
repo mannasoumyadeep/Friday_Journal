@@ -45,11 +45,7 @@ class FridayJournals:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-extensions')
-        options.add_argument('--disable-software-rasterizer')
-        
-        # Additional options for stability
-        options.add_argument('--ignore-certificate-errors')
-        options.add_argument('--allow-running-insecure-content')
+        options.binary_location = '/usr/bin/chromium'
         
         prefs = {
             'download.default_directory': os.path.abspath(self.download_dir),
@@ -60,18 +56,15 @@ class FridayJournals:
         options.add_experimental_option('prefs', prefs)
         
         try:
-            # Use ChromeDriverManager without version parameter
-            from selenium.webdriver.chrome.service import Service as ChromeService
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = ChromeService(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=options)
+            # Use undetected_chromedriver for better compatibility
+            import undetected_chromedriver as uc
+            driver = uc.Chrome(options=options)
+            return driver
             
         except Exception as e:
             self.logger.error(f"Error setting up ChromeDriver: {str(e)}")
             st.error("Failed to initialize Chrome driver. Please try again later.")
             raise
-            
-        return driver
 
     def download_pdfs(self, progress_bar):
         """Download PDFs using Selenium"""
