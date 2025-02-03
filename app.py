@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Feb  3 12:16:04 2025
-
-@author: prate
-"""
-
 import streamlit as st
 import os
 import time
@@ -50,14 +43,35 @@ class FridayJournals:
         options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-software-rasterizer')
+        
+        # Additional options for stability
+        options.add_argument('--ignore-certificate-errors')
+        options.add_argument('--allow-running-insecure-content')
+        
         prefs = {
             'download.default_directory': os.path.abspath(self.download_dir),
             'download.prompt_for_download': False,
-            'plugins.always_open_pdf_externally': True
+            'plugins.always_open_pdf_externally': True,
+            'profile.default_content_setting_values.automatic_downloads': 1
         }
         options.add_experimental_option('prefs', prefs)
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
+        
+        try:
+            # Try using the latest ChromeDriver version
+            from selenium.webdriver.chrome.service import Service as ChromeService
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = ChromeService(ChromeDriverManager(version="stable").install())
+            driver = webdriver.Chrome(service=service, options=options)
+            
+        except Exception as e:
+            self.logger.error(f"Error setting up ChromeDriver: {str(e)}")
+            st.error("Failed to initialize Chrome driver. Please try again later.")
+            raise
+            
+        return driver
 
     def download_pdfs(self, progress_bar):
         """Download PDFs using Selenium"""
