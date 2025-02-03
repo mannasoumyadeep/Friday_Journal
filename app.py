@@ -43,22 +43,20 @@ class FridayJournals:
         options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--disable-extensions')
-        options.binary_location = '/usr/bin/chromium'
         
         prefs = {
             'download.default_directory': os.path.abspath(self.download_dir),
             'download.prompt_for_download': False,
-            'plugins.always_open_pdf_externally': True,
-            'profile.default_content_setting_values.automatic_downloads': 1
+            'plugins.always_open_pdf_externally': True
         }
         options.add_experimental_option('prefs', prefs)
         
         try:
-            # Use undetected_chromedriver for better compatibility
-            import undetected_chromedriver as uc
-            driver = uc.Chrome(options=options)
+            # Set up Chrome driver with specific version
+            from selenium.webdriver.chrome.service import Service
+            driver_path = '/usr/bin/chromedriver'
+            service = Service(executable_path=driver_path)
+            driver = webdriver.Chrome(service=service, options=options)
             return driver
             
         except Exception as e:
