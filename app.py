@@ -60,10 +60,10 @@ class FridayJournals:
         options.add_experimental_option('prefs', prefs)
         
         try:
-            # Try using the latest ChromeDriver version
+            # Use ChromeDriverManager without version parameter
             from selenium.webdriver.chrome.service import Service as ChromeService
             from webdriver_manager.chrome import ChromeDriverManager
-            service = ChromeService(ChromeDriverManager(version="stable").install())
+            service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
             
         except Exception as e:
