@@ -65,38 +65,55 @@ class FridayJournals:
         """Download PDFs using Selenium"""
         driver = self.setup_chrome_driver()
         downloaded_files = []
+        base_url = "https://search.ipindia.gov.in/IPOJournal/Journal/ViewJournal"
         
         try:
             driver.get(self.url)
             wait = WebDriverWait(driver, 20)
             
-            # XPaths for PDF downloads
-            xpaths = [
-                '//*[@id="Journal"]/tbody/tr[1]/td[5]/form[1]/button',
-                '/html/body/div[3]/div/div/div[3]/div/div[1]/div/div/div[2]/div/table/tbody/tr[1]/td[5]/form[2]/button'
-            ]
+            # Get the first row (latest journal)
+            row = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="Journal"]/tbody/tr[1]')))
+            forms = row.find_elements(By.TAG_NAME, "form")
             
-            for i, xpath in enumerate(xpaths, 1):
+            # Extract file names and download using POST requests
+            for i, form in enumerate(forms[:2], 1):  # Only first two forms (Part I and II)
                 try:
-                    button = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                    driver.execute_script("arguments[0].click();", button)
-                    time.sleep(5)  # Wait for download
+                    filename_input = form.find_element(By.NAME, "FileName")
+                    filename = filename_input.get_attribute("value")
                     
-                    # Look for downloaded file
-                    expected_file = os.path.join(self.temp_dir, f"Part_{i}.pdf")
-                    if os.path.exists(expected_file):
-                        downloaded_files.append(expected_file)
+                    # Create session and send POST request
+                    session = requests.Session()
+                    response = session.post(
+                        base_url,
+                        data={"FileName": filename},
+                        stream=True
+                    )
+                    
+                    if response.status_code == 200:
+                        # Save the PDF
+                        pdf_path = os.path.join(self.temp_dir, f"Part_{i}.pdf")
+                        with open(pdf_path, "wb") as f:
+                            f.write(response.content)
+                        
+                        downloaded_files.append(pdf_path)
                         st.success(f"Successfully downloaded Part {i}")
                     else:
-                        st.warning(f"Part {i} download may have failed")
+                        st.warning(f"Failed to download Part {i}: HTTP {response.status_code}")
                     
                     progress_bar.progress((i * 0.5))
                     
                 except Exception as e:
-                    self.logger.error(f"Error downloading PDF {i}: {str(e)}")
+                    self.logger.error(f"Error downloading Part {i}: {str(e)}")
                     st.error(f"Error downloading Part {i}")
                 
+                time.sleep(2)  # Add delay between downloads
+                
             return downloaded_files
+            
+        except Exception as e:
+            self.logger.error(f"Error in download process: {str(e)}")
+            st.error("Error accessing the journal website")
+            return []
             
         finally:
             driver.quit()
