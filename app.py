@@ -15,6 +15,8 @@ import pandas as pd
 import io
 import base64
 import tempfile
+import requests  # Added this import
+
 
 class FridayJournals:
     def __init__(self):
