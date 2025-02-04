@@ -9,17 +9,17 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import PyPDF2
 import re
 import pandas as pd
 import io
 import base64
+import tempfile
 
 class FridayJournals:
     def __init__(self):
         self.url = "https://search.ipindia.gov.in/IPOJournal/Journal/Patent"
-        self.download_dir = "downloads"
+        self.temp_dir = tempfile.mkdtemp()  # Create a temporary directory
         self.setup_logging()
         
     def setup_logging(self):
@@ -44,21 +44,18 @@ class FridayJournals:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         
+        # Set download directory
         prefs = {
-            'download.default_directory': os.path.abspath(self.download_dir),
+            'download.default_directory': self.temp_dir,
             'download.prompt_for_download': False,
             'plugins.always_open_pdf_externally': True
         }
         options.add_experimental_option('prefs', prefs)
         
         try:
-            # Set up Chrome driver with specific version
-            from selenium.webdriver.chrome.service import Service
-            driver_path = '/usr/bin/chromedriver'
-            service = Service(executable_path=driver_path)
+            service = Service(executable_path='/usr/bin/chromedriver')
             driver = webdriver.Chrome(service=service, options=options)
             return driver
-            
         except Exception as e:
             self.logger.error(f"Error setting up ChromeDriver: {str(e)}")
             st.error("Failed to initialize Chrome driver. Please try again later.")
@@ -66,9 +63,6 @@ class FridayJournals:
 
     def download_pdfs(self, progress_bar):
         """Download PDFs using Selenium"""
-        if not os.path.exists(self.download_dir):
-            os.makedirs(self.download_dir)
-            
         driver = self.setup_chrome_driver()
         downloaded_files = []
         
@@ -86,18 +80,22 @@ class FridayJournals:
                 try:
                     button = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
                     driver.execute_script("arguments[0].click();", button)
+                    time.sleep(5)  # Wait for download
                     
-                    # Wait for download
-                    time.sleep(5)
+                    # Look for downloaded file
+                    expected_file = os.path.join(self.temp_dir, f"Part_{i}.pdf")
+                    if os.path.exists(expected_file):
+                        downloaded_files.append(expected_file)
+                        st.success(f"Successfully downloaded Part {i}")
+                    else:
+                        st.warning(f"Part {i} download may have failed")
+                    
                     progress_bar.progress((i * 0.5))
-                    
-                    # Add downloaded file to list
-                    expected_file = f"Part_{i}.pdf"
-                    downloaded_files.append(os.path.join(self.download_dir, expected_file))
                     
                 except Exception as e:
                     self.logger.error(f"Error downloading PDF {i}: {str(e)}")
-                    
+                    st.error(f"Error downloading Part {i}")
+                
             return downloaded_files
             
         finally:
@@ -112,8 +110,21 @@ class FridayJournals:
         for i, pdf_file in enumerate(pdf_files):
             try:
                 with open(pdf_file, 'rb') as file:
-                    reader = PyPDF2.PdfReader(file)
-                    for page in reader.pages:
+                    # Display PDF download option
+                    pdf_bytes = file.read()
+                    pdf_b64 = base64.b64encode(pdf_bytes).decode()
+                    st.download_button(
+                        label=f"Download Part {i+1}",
+                        data=pdf_bytes,
+                        file_name=f"Part_{i+1}.pdf",
+                        mime="application/pdf"
+                    )
+                    
+                    # Extract application numbers
+                    reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+                    st.write(f"Processing Part {i+1} - {len(reader.pages)} pages")
+                    
+                    for page_num, page in enumerate(reader.pages):
                         text = page.extract_text()
                         matches = re.findall(pattern, text)
                         application_numbers.extend(matches)
@@ -122,6 +133,7 @@ class FridayJournals:
                 
             except Exception as e:
                 self.logger.error(f"Error extracting from {pdf_file}: {str(e)}")
+                st.error(f"Error processing Part {i+1}")
                 
         return application_numbers
 
@@ -163,17 +175,17 @@ def main():
             application_numbers = app.extract_application_numbers(pdf_files, progress_bar)
             
             if not application_numbers:
-                st.error("No application numbers found in the PDFs.")
+                st.warning("No application numbers found in the PDFs.")
                 return
 
             # Step 3: Create Excel File
             status_text.text("Creating Excel file...")
             excel_buffer = app.create_excel(application_numbers)
             
-            # Success message and download button
+            # Success message and download buttons
             st.success(f"✅ Successfully extracted {len(application_numbers)} application numbers!")
             
-            # Create download button
+            # Create download button for Excel
             st.download_button(
                 label="📥 Download Excel File",
                 data=excel_buffer,
@@ -191,12 +203,6 @@ def main():
             app.logger.error(f"Process failed: {str(e)}")
 
         finally:
-            # Cleanup downloaded files
-            for file in os.listdir(app.download_dir):
-                try:
-                    os.remove(os.path.join(app.download_dir, file))
-                except:
-                    pass
             status_text.text("Processing complete!")
 
     # Add instructions
@@ -205,9 +211,10 @@ def main():
         1. Click 'Start Processing' to begin
         2. The app will:
            - Download the latest patent journal PDFs
+           - Show download options for each PDF
            - Extract all application numbers
            - Generate an Excel file for download
-        3. Download the Excel file when processing is complete
+        3. Download the PDFs and Excel file when processing is complete
         
         Note: This process may take a few minutes to complete.
         """)
