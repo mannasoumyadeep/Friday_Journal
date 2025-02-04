@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -15,20 +15,36 @@ import pandas as pd
 import io
 import base64
 import tempfile
-import requests  # Added this import
-
+import requests
+import schedule
+import json
+from pathlib import Path
 
 class FridayJournals:
     def __init__(self):
         self.url = "https://search.ipindia.gov.in/IPOJournal/Journal/Patent"
-        self.temp_dir = tempfile.mkdtemp()  # Create a temporary directory
+        self.base_dir = Path("friday_journals_data")
+        self.setup_storage()
         self.setup_logging()
         
+    def setup_storage(self):
+        """Setup storage directories"""
+        # Create main directory
+        self.base_dir.mkdir(exist_ok=True)
+        
+        # Create subdirectories
+        (self.base_dir / "pdfs").mkdir(exist_ok=True)
+        (self.base_dir / "excel").mkdir(exist_ok=True)
+        (self.base_dir / "logs").mkdir(exist_ok=True)
+        
+        # Create metadata file if it doesn't exist
+        self.metadata_file = self.base_dir / "metadata.json"
+        if not self.metadata_file.exists():
+            self.save_metadata({})
+
     def setup_logging(self):
         """Set up logging configuration"""
-        if not os.path.exists('logs'):
-            os.makedirs('logs')
-        log_file = f'logs/friday_journals_{datetime.now().strftime("%Y%m%d")}.log'
+        log_file = self.base_dir / "logs" / f"friday_journals_{datetime.now().strftime('%Y%m%d')}.log"
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -39,6 +55,171 @@ class FridayJournals:
         )
         self.logger = logging.getLogger(__name__)
 
+    def get_friday_date(self):
+        """Get the current or previous Friday's date"""
+        today = datetime.now()
+        friday = today - timedelta(days=(today.weekday() - 4) % 7)
+        return friday.strftime("%d %B %Y")
+
+    def save_metadata(self, data):
+        """Save metadata to JSON file"""
+        with open(self.metadata_file, 'w') as f:
+            json.dump(data, f)
+
+    def load_metadata(self):
+        """Load metadata from JSON file"""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def process_journal(self, friday_date=None):
+        """Process journal for a specific Friday"""
+        if friday_date is None:
+            friday_date = self.get_friday_date()
+            
+        # Create directory for this Friday
+        date_dir = self.base_dir / "pdfs" / friday_date.replace(" ", "_")
+        date_dir.mkdir(exist_ok=True)
+        
+        # Download and process PDFs
+        downloaded_files = self.download_pdfs(date_dir)
+        if not downloaded_files:
+            return False
+            
+        # Extract application numbers and create Excel
+        application_numbers = []
+        pages_without_numbers = []
+        
+        for pdf_file in downloaded_files:
+            numbers, no_number_pages = self.process_pdf(pdf_file)
+            application_numbers.extend(numbers)
+            pages_without_numbers.extend(no_number_pages)
+            
+        # Save pages without application numbers
+        if pages_without_numbers:
+            output_pdf = date_dir / f"{friday_date.replace(' ', '_')}_pages_without_application_numbers.pdf"
+            self.create_pdf_without_numbers(pages_without_numbers, output_pdf)
+            
+        # Create Excel file
+        excel_path = self.create_excel(
+            application_numbers,
+            self.base_dir / "excel" / f"{friday_date} Early and Publication after 18mo (All Jurisdiction).xlsx"
+        )
+        
+        # Update metadata
+        metadata = self.load_metadata()
+        metadata[friday_date] = {
+            'pdf_dir': str(date_dir),
+            'excel_file': str(excel_path),
+            'total_applications': len(application_numbers),
+            'processed_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.save_metadata(metadata)
+        
+        return True
+
+    def download_pdfs(self, output_dir):
+        """Download PDFs and return list of file paths"""
+        driver = None
+        downloaded_files = []
+        base_url = "https://search.ipindia.gov.in/IPOJournal/Journal/ViewJournal"
+        
+        try:
+            driver = self.setup_chrome_driver()
+            wait = WebDriverWait(driver, 20)
+            driver.get(self.url)
+            
+            # Get forms from first row
+            row = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="Journal"]/tbody/tr[1]')))
+            forms = row.find_elements(By.TAG_NAME, "form")
+            
+            for i, form in enumerate(forms[:2], 1):
+                try:
+                    filename_input = form.find_element(By.NAME, "FileName")
+                    filename = filename_input.get_attribute("value")
+                    
+                    # Download file
+                    session = requests.Session()
+                    response = session.post(base_url, data={"FileName": filename}, stream=True)
+                    
+                    if response.status_code == 200:
+                        output_file = output_dir / f"Part_{i}.pdf"
+                        with open(output_file, "wb") as f:
+                            f.write(response.content)
+                        downloaded_files.append(output_file)
+                        self.logger.info(f"Downloaded Part {i}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error downloading Part {i}: {str(e)}")
+                
+                time.sleep(2)
+                
+            return downloaded_files
+            
+        except Exception as e:
+            self.logger.error(f"Error in download process: {str(e)}")
+            return []
+            
+        finally:
+            if driver:
+                driver.quit()
+
+    def process_pdf(self, pdf_path):
+        """Process PDF and return application numbers and pages without numbers"""
+        application_numbers = []
+        pages_without_numbers = []
+        pattern = r"Application No\.(\d+)\s*A"
+        
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                for page_num, page in enumerate(reader.pages):
+                    text = page.extract_text()
+                    matches = re.findall(pattern, text)
+                    
+                    if matches:
+                        application_numbers.extend(matches)
+                    else:
+                        pages_without_numbers.append((pdf_path, page_num))
+                        
+        except Exception as e:
+            self.logger.error(f"Error processing {pdf_path}: {str(e)}")
+            
+        return application_numbers, pages_without_numbers
+
+    def create_pdf_without_numbers(self, pages_info, output_path):
+        """Create PDF with pages that don't have application numbers"""
+        writer = PyPDF2.PdfWriter()
+        
+        try:
+            # Group pages by source PDF
+            current_pdf = None
+            reader = None
+            
+            for pdf_path, page_num in pages_info:
+                if current_pdf != pdf_path:
+                    current_pdf = pdf_path
+                    reader = PyPDF2.PdfReader(open(current_pdf, 'rb'))
+                
+                writer.add_page(reader.pages[page_num])
+            
+            with open(output_path, 'wb') as output_file:
+                writer.write(output_file)
+                
+        except Exception as e:
+            self.logger.error(f"Error creating PDF without numbers: {str(e)}")
+
+    def create_excel(self, application_numbers, output_path):
+        """Create Excel file with application numbers"""
+        try:
+            df = pd.DataFrame(application_numbers, columns=['Application Number'])
+            df.to_excel(output_path, index=False)
+            return output_path
+        except Exception as e:
+            self.logger.error(f"Error creating Excel file: {str(e)}")
+            return None
+
     def setup_chrome_driver(self):
         """Setup Chrome driver with appropriate options"""
         options = Options()
@@ -46,123 +227,17 @@ class FridayJournals:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         
-        # Set download directory
-        prefs = {
-            'download.default_directory': self.temp_dir,
-            'download.prompt_for_download': False,
-            'plugins.always_open_pdf_externally': True
-        }
-        options.add_experimental_option('prefs', prefs)
-        
         try:
             service = Service(executable_path='/usr/bin/chromedriver')
-            driver = webdriver.Chrome(service=service, options=options)
-            return driver
+            return webdriver.Chrome(service=service, options=options)
         except Exception as e:
             self.logger.error(f"Error setting up ChromeDriver: {str(e)}")
-            st.error("Failed to initialize Chrome driver. Please try again later.")
             raise
 
-    def download_pdfs(self, progress_bar):
-        """Download PDFs using Selenium"""
-        driver = self.setup_chrome_driver()
-        downloaded_files = []
-        base_url = "https://search.ipindia.gov.in/IPOJournal/Journal/ViewJournal"
-        
-        try:
-            driver.get(self.url)
-            wait = WebDriverWait(driver, 20)
-            
-            # Get the first row (latest journal)
-            row = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="Journal"]/tbody/tr[1]')))
-            forms = row.find_elements(By.TAG_NAME, "form")
-            
-            # Extract file names and download using POST requests
-            for i, form in enumerate(forms[:2], 1):  # Only first two forms (Part I and II)
-                try:
-                    filename_input = form.find_element(By.NAME, "FileName")
-                    filename = filename_input.get_attribute("value")
-                    
-                    # Create session and send POST request
-                    session = requests.Session()
-                    response = session.post(
-                        base_url,
-                        data={"FileName": filename},
-                        stream=True
-                    )
-                    
-                    if response.status_code == 200:
-                        # Save the PDF
-                        pdf_path = os.path.join(self.temp_dir, f"Part_{i}.pdf")
-                        with open(pdf_path, "wb") as f:
-                            f.write(response.content)
-                        
-                        downloaded_files.append(pdf_path)
-                        st.success(f"Successfully downloaded Part {i}")
-                    else:
-                        st.warning(f"Failed to download Part {i}: HTTP {response.status_code}")
-                    
-                    progress_bar.progress((i * 0.5))
-                    
-                except Exception as e:
-                    self.logger.error(f"Error downloading Part {i}: {str(e)}")
-                    st.error(f"Error downloading Part {i}")
-                
-                time.sleep(2)  # Add delay between downloads
-                
-            return downloaded_files
-            
-        except Exception as e:
-            self.logger.error(f"Error in download process: {str(e)}")
-            st.error("Error accessing the journal website")
-            return []
-            
-        finally:
-            driver.quit()
-
-    def extract_application_numbers(self, pdf_files, progress_bar):
-        """Extract application numbers from PDFs"""
-        application_numbers = []
-        pattern = r"Application No\.(\d+)\s*A"
-        
-        total_files = len(pdf_files)
-        for i, pdf_file in enumerate(pdf_files):
-            try:
-                with open(pdf_file, 'rb') as file:
-                    # Display PDF download option
-                    pdf_bytes = file.read()
-                    pdf_b64 = base64.b64encode(pdf_bytes).decode()
-                    st.download_button(
-                        label=f"Download Part {i+1}",
-                        data=pdf_bytes,
-                        file_name=f"Part_{i+1}.pdf",
-                        mime="application/pdf"
-                    )
-                    
-                    # Extract application numbers
-                    reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-                    st.write(f"Processing Part {i+1} - {len(reader.pages)} pages")
-                    
-                    for page_num, page in enumerate(reader.pages):
-                        text = page.extract_text()
-                        matches = re.findall(pattern, text)
-                        application_numbers.extend(matches)
-                        
-                progress_bar.progress(0.5 + ((i + 1) / total_files * 0.5))
-                
-            except Exception as e:
-                self.logger.error(f"Error extracting from {pdf_file}: {str(e)}")
-                st.error(f"Error processing Part {i+1}")
-                
-        return application_numbers
-
-    def create_excel(self, application_numbers):
-        """Create Excel file with application numbers"""
-        df = pd.DataFrame(application_numbers, columns=['Application Number'])
-        excel_buffer = io.BytesIO()
-        df.to_excel(excel_buffer, index=False)
-        excel_buffer.seek(0)
-        return excel_buffer
+def friday_job():
+    """Job to run every Friday"""
+    app = FridayJournals()
+    app.process_journal()
 
 def main():
     st.set_page_config(
@@ -172,71 +247,64 @@ def main():
     )
 
     st.title("Friday Journals")
-    st.write("Automatically download and extract patent application numbers from IPO journals")
+    st.write("Patent Application Number Extractor from IPO Journals")
 
     app = FridayJournals()
+    metadata = app.load_metadata()
 
-    if st.button("Start Processing", type="primary"):
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    # Show available dates
+    if metadata:
+        st.subheader("Available Journals")
+        for date, info in metadata.items():
+            with st.expander(f"📅 {date}"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    excel_path = Path(info['excel_file'])
+                    if excel_path.exists():
+                        with open(excel_path, 'rb') as f:
+                            st.download_button(
+                                f"📥 Download Excel ({info['total_applications']} applications)",
+                                f,
+                                file_name=excel_path.name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                
+                with col2:
+                    pdf_dir = Path(info['pdf_dir'])
+                    no_numbers_pdf = pdf_dir / f"{date.replace(' ', '_')}_pages_without_application_numbers.pdf"
+                    if no_numbers_pdf.exists():
+                        with open(no_numbers_pdf, 'rb') as f:
+                            st.download_button(
+                                "📥 Download Pages without Application Numbers",
+                                f,
+                                file_name=no_numbers_pdf.name,
+                                mime="application/pdf"
+                            )
 
-        try:
-            # Step 1: Download PDFs
-            status_text.text("Downloading PDFs...")
-            pdf_files = app.download_pdfs(progress_bar)
-            
-            if not pdf_files:
-                st.error("Failed to download PDFs. Please try again.")
-                return
-
-            # Step 2: Extract Application Numbers
-            status_text.text("Extracting application numbers...")
-            application_numbers = app.extract_application_numbers(pdf_files, progress_bar)
-            
-            if not application_numbers:
-                st.warning("No application numbers found in the PDFs.")
-                return
-
-            # Step 3: Create Excel File
-            status_text.text("Creating Excel file...")
-            excel_buffer = app.create_excel(application_numbers)
-            
-            # Success message and download buttons
-            st.success(f"✅ Successfully extracted {len(application_numbers)} application numbers!")
-            
-            # Create download button for Excel
-            st.download_button(
-                label="📥 Download Excel File",
-                data=excel_buffer,
-                file_name=f"application_numbers_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-            # Display sample of extracted numbers
-            st.write("Sample of extracted application numbers:")
-            sample_df = pd.DataFrame(application_numbers[:10], columns=['Application Number'])
-            st.dataframe(sample_df)
-
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-            app.logger.error(f"Process failed: {str(e)}")
-
-        finally:
-            status_text.text("Processing complete!")
+    # Manual processing button
+    if st.button("Process Latest Journal", type="primary"):
+        with st.spinner("Processing latest journal..."):
+            if app.process_journal():
+                st.success("✅ Processing completed successfully!")
+                st.rerun()
+            else:
+                st.error("Failed to process journal. Please try again.")
 
     # Add instructions
     with st.expander("📖 Instructions"):
         st.write("""
-        1. Click 'Start Processing' to begin
-        2. The app will:
-           - Download the latest patent journal PDFs
-           - Show download options for each PDF
-           - Extract all application numbers
-           - Generate an Excel file for download
-        3. Download the PDFs and Excel file when processing is complete
-        
-        Note: This process may take a few minutes to complete.
+        1. The app automatically processes new journals every Friday night
+        2. You can also click 'Process Latest Journal' to run manually
+        3. Download files:
+           - Excel file contains all extracted application numbers
+           - PDF file contains pages without application numbers
+        4. All processed journals are archived and available for download
         """)
 
 if __name__ == "__main__":
+    # Schedule Friday job
+    schedule.every().friday.at("23:00").do(friday_job)
+    
+    # Run the Streamlit app
     main()
